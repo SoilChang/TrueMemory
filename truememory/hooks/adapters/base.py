@@ -65,6 +65,87 @@ class CLIAdapter(ABC):
     def get_system_prompt_content(self) -> str:
         """Return the TrueMemory system prompt content for this CLI."""
 
+    def install_system_prompt(self) -> None:
+        """Merge the TrueMemory system prompt instructions into the CLI's prompt file."""
+        target_path = self.get_system_prompt_path()
+        if not target_path:
+            return
+        prompt_content = self.get_system_prompt_content()
+        if not prompt_content:
+            return
+
+        managed_block = (
+            f"\n{_PROMPT_MARKER_START}\n"
+            f"{prompt_content.strip()}\n"
+            f"{_PROMPT_MARKER_END}\n"
+        )
+
+        try:
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            print(f"  [WARN] Cannot create {target_path.parent}: {e}")
+            return
+
+        # Read existing content if present
+        existing = ""
+        if target_path.exists():
+            try:
+                existing = target_path.read_text(encoding="utf-8")
+            except OSError as e:
+                print(f"  [WARN] Cannot read existing prompt file: {e}")
+                return
+
+        # Back up the existing file before mutating it
+        if existing and target_path.exists():
+            import time as _time
+            backup_path = target_path.with_name(f"{target_path.name}.bak.{int(_time.time())}")
+            try:
+                backup_path.write_text(existing, encoding="utf-8")
+            except OSError:
+                pass  # Non-fatal
+
+        # If a managed block already exists, replace it; otherwise append
+        if _PROMPT_MARKER_START in existing and _PROMPT_MARKER_END in existing:
+            before, _, rest = existing.partition(_PROMPT_MARKER_START)
+            _, _, after = rest.partition(_PROMPT_MARKER_END)
+            new_content = before.rstrip() + managed_block + after.lstrip()
+        else:
+            new_content = existing.rstrip() + "\n" + managed_block if existing else managed_block
+
+        try:
+            target_path.write_text(new_content, encoding="utf-8")
+            print(f"  [OK] Merged truememory instructions into {target_path}")
+        except OSError as e:
+            print(f"  [WARN] Cannot write system prompt file: {e}")
+
+    def uninstall_system_prompt(self) -> None:
+        """Remove TrueMemory system prompt instructions from the CLI's prompt file."""
+        target_path = self.get_system_prompt_path()
+        if not target_path or not target_path.exists():
+            return
+
+        try:
+            content = target_path.read_text(encoding="utf-8")
+            if _PROMPT_MARKER_START in content and _PROMPT_MARKER_END in content:
+                before, _, rest = content.partition(_PROMPT_MARKER_START)
+                _, _, after = rest.partition(_PROMPT_MARKER_END)
+                new_content = (before.rstrip() + "\n" + after.lstrip()).strip() + "\n"
+                if new_content.strip() == "":
+                    try:
+                        target_path.unlink()
+                        print(f"  Removed empty prompt file: {target_path}")
+                    except OSError:
+                        pass
+                else:
+                    target_path.write_text(new_content, encoding="utf-8")
+                    print(f"  Removed truememory instructions from {target_path}")
+        except OSError:
+            pass
+
+
+_PROMPT_MARKER_START = "<!-- BEGIN truememory-ingest managed section -->"
+_PROMPT_MARKER_END = "<!-- END truememory-ingest managed section -->"
+
 
 def get_generic_system_prompt() -> str:
     """Return the TrueMemory system prompt for non-Claude CLIs."""
@@ -84,3 +165,4 @@ def get_generic_system_prompt() -> str:
         "- Use `truememory_search` to recall stored memories before answering.\n"
         "- Search TrueMemory FIRST on any 'do you remember' question.\n"
     )
+

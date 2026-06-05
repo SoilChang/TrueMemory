@@ -321,3 +321,77 @@ class ClaudeAdapter(CLIAdapter):
             except OSError:
                 pass
         return ""
+
+    def can_complete(self) -> bool:
+        if shutil.which("claude") is None:
+            return False
+        claude_dir = Path.home() / ".claude"
+        if not claude_dir.is_dir():
+            return False
+        try:
+            import subprocess
+            proc = subprocess.run(
+                ["claude", "auth", "status"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            return proc.returncode == 0
+        except Exception:
+            return False
+
+    def complete(self, config: LLMConfig, prompt: str, system: str = "") -> str:
+        import os
+        import subprocess
+        from truememory.ingest.models import LLMError
+
+        exe_path = shutil.which("claude")
+        if not exe_path:
+            raise LLMError(
+                "`claude` CLI not found on PATH. Install Claude Code or "
+                "choose a different --provider."
+            )
+
+        full_prompt = f"{system}\n\n{prompt}" if system else prompt
+        cmd = [exe_path, "-p", "--output-format", "json"]
+        if config.model:
+            cmd.extend(["--model", config.model])
+
+        env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
+        env["TRUEMEMORY_EXTRACTION"] = "1"
+
+        try:
+            proc = subprocess.run(
+                cmd,
+                input=full_prompt,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=120,
+                env=env,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as e:
+            raise LLMError("claude CLI timed out after 120s") from e
+        except OSError as e:
+            raise LLMError(f"claude CLI invocation failed: {e}") from e
+
+        if proc.returncode != 0:
+            stderr = (proc.stderr or "").strip()[:500]
+            raise LLMError(f"claude CLI exit {proc.returncode}: {stderr or 'no stderr'}")
+
+        stdout_raw = proc.stdout.strip()
+        try:
+            data = json.loads(stdout_raw)
+        except json.JSONDecodeError as e:
+            raise LLMError(f"claude CLI returned non-JSON: {stdout_raw[:300]}") from e
+
+        if data.get("is_error"):
+            raise LLMError(f"claude CLI reported error: {data.get('result', 'unknown')}")
+
+        result = data.get("result")
+        if not isinstance(result, str):
+            raise LLMError(f"claude CLI response missing 'result' string: {data}")
+        return result
+

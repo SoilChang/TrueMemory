@@ -287,3 +287,42 @@ def test_build_command_with_user_and_db():
     assert "--user" in cmd
     assert "alice" in cmd
     assert "--db" in cmd
+
+
+def test_install_and_uninstall_system_prompt(tmp_path, monkeypatch):
+    from truememory.hooks.adapters.gemini import GeminiAdapter
+    adapter = GeminiAdapter()
+
+    # Mock prompt path to be inside tmp_path
+    prompt_file = tmp_path / "GEMINI.md"
+    monkeypatch.setattr(adapter, "get_system_prompt_path", lambda: prompt_file)
+
+    # 1. Install to empty/non-existent file
+    adapter.install_system_prompt()
+    assert prompt_file.exists()
+    content = prompt_file.read_text(encoding="utf-8")
+    assert "<!-- BEGIN truememory-ingest managed section -->" in content
+    assert "TrueMemory" in content
+
+    # 2. Install again (idempotent, shouldn't duplicate)
+    adapter.install_system_prompt()
+    content2 = prompt_file.read_text(encoding="utf-8")
+    assert content2.count("<!-- BEGIN truememory-ingest managed section -->") == 1
+
+    # 3. Uninstall (should remove file if empty)
+    adapter.uninstall_system_prompt()
+    assert not prompt_file.exists()
+
+    # 4. Uninstall with other user content (should preserve other content)
+    prompt_file.write_text("User custom instruction here\n", encoding="utf-8")
+    adapter.install_system_prompt()
+    content_merged = prompt_file.read_text(encoding="utf-8")
+    assert "User custom instruction here" in content_merged
+    assert "<!-- BEGIN truememory-ingest managed section -->" in content_merged
+
+    adapter.uninstall_system_prompt()
+    assert prompt_file.exists()
+    content_cleaned = prompt_file.read_text(encoding="utf-8")
+    assert "User custom instruction here" in content_cleaned
+    assert "<!-- BEGIN truememory-ingest managed section -->" not in content_cleaned
+

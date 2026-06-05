@@ -146,7 +146,9 @@ def auto_detect() -> LLMConfig:
         return cfg
 
     # 2. Claude CLI — zero additional cost for subscribers, no key mgmt
-    if _claude_cli_available():
+    from truememory.hooks.registry import get_adapter
+    claude = get_adapter("claude")
+    if claude and claude.can_complete():
         log.info("Auto-detected Claude CLI (subscription auth)")
         return hydrate_config(LLMConfig(provider="claude_cli"))
 
@@ -180,7 +182,7 @@ def complete(config: LLMConfig, prompt: str, system: str = "") -> str:
     if config.provider == "anthropic":
         return _complete_anthropic(config, prompt, system)
     if config.provider in ("claude_cli", "claude-cli"):
-        return _complete_claude_cli(config, prompt, system)
+        return _complete_local_cli(config, prompt, system)
     return _complete_openai_compat(config, prompt, system)
 
 
@@ -358,81 +360,31 @@ def _complete_anthropic(config: LLMConfig, prompt: str, system: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Claude CLI completion (uses the local `claude` binary + subscription auth)
+# Local CLI completion (uses a registered CLI adapter)
 # ---------------------------------------------------------------------------
 
-def _claude_cli_available() -> bool:
-    """Return True if the `claude` CLI binary is on PATH."""
-    return shutil.which("claude") is not None
+def _complete_local_cli(config: LLMConfig, prompt: str, system: str) -> str:
+    """Complete using a local CLI binary via its registered CLI adapter.
 
-
-def _complete_claude_cli(config: LLMConfig, prompt: str, system: str) -> str:
-    """Complete using the local ``claude`` CLI in one-shot print mode.
-
-    This backend requires zero API keys — it uses the user's existing
-    Claude Code subscription auth (OAuth/keychain). Ideal for offline-first
-    deployments where the user already has Claude Code installed.
-
-    Importantly: we **unset ANTHROPIC_API_KEY** before invoking the CLI
-    because ``claude --bare`` and some other modes will prefer that env
-    var if set, and a stale key would cause the CLI to return auth errors
-    instead of using the working OAuth path.
+    This backend delegates execution to the corresponding CLI adapter,
+    which manages its own binary arguments, authentication checks, and
+    output parsing formats.
 
     Raises LLMError on CLI failure or malformed output.
     """
-    if not _claude_cli_available():
-        raise LLMError(
-            "`claude` CLI not found on PATH. Install Claude Code or "
-            "choose a different --provider."
-        )
+    from truememory.hooks.registry import get_adapter
 
-    # Claude CLI supports a system prompt via --append-system-prompt; we fold
-    # any system content into the user prompt for simplicity (extractors
-    # embed their system prompt in the user message anyway).
-    full_prompt = f"{system}\n\n{prompt}" if system else prompt
+    provider = config.provider
+    if provider == "auto":
+        provider = "claude_cli"
 
-    _claude_exe = shutil.which("claude") or "claude"
-    cmd = [_claude_exe, "-p", "--output-format", "json"]
-    if config.model:
-        cmd.extend(["--model", config.model])
-
-    # Strip ANTHROPIC_API_KEY so the CLI uses OAuth/keychain auth rather
-    # than a potentially stale key from the parent environment.
-    env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
-    env["TRUEMEMORY_EXTRACTION"] = "1"
+    # Normalize 'claude_cli' -> 'claude'
+    cli_id = provider.replace("_cli", "").replace("-cli", "")
+    adapter = get_adapter(cli_id)
+    if not adapter:
+        raise LLMError(f"No adapter found for provider: {provider}")
 
     try:
-        proc = subprocess.run(
-            cmd,
-            input=full_prompt,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=120,
-            env=env,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as e:
-        raise LLMError("claude CLI timed out after 120s") from e
-    except OSError as e:
-        raise LLMError(f"claude CLI invocation failed: {e}") from e
-
-    if proc.returncode != 0:
-        stderr = (proc.stderr or "").strip()[:500]
-        raise LLMError(f"claude CLI exit {proc.returncode}: {stderr or 'no stderr'}")
-
-    # Parse the --output-format json envelope: {type, subtype, is_error, result, ...}
-    try:
-        data = json.loads(proc.stdout)
-    except json.JSONDecodeError as e:
-        raise LLMError(f"claude CLI returned non-JSON: {proc.stdout[:300]}") from e
-
-    if data.get("is_error"):
-        raise LLMError(f"claude CLI reported error: {data.get('result', 'unknown')}")
-
-    result = data.get("result")
-    if not isinstance(result, str):
-        raise LLMError(f"claude CLI response missing 'result' string: {data}")
-
-    return result
+        return adapter.complete(config, prompt, system)
+    except NotImplementedError as e:
+        raise LLMError(f"CLI adapter '{adapter.name}' does not support completion.") from e

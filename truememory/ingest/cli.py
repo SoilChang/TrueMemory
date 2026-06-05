@@ -196,8 +196,9 @@ def _run_ingest(args):
         # would proceed, let extract_facts return [] due to LLMError, and
         # exit 0 — which made shell scripts think the ingest succeeded.
         if config.provider == "claude_cli":
-            from truememory.ingest.models import _claude_cli_available
-            if not _claude_cli_available():
+            from truememory.hooks.registry import get_adapter
+            claude = get_adapter("claude")
+            if not claude or not claude.can_complete():
                 print(
                     "ERROR: --provider claude_cli requested but `claude` CLI is not on PATH.\n"
                     "       Install Claude Code or choose a different --provider.",
@@ -869,10 +870,8 @@ def _run_install(args):
 
             prompt_path = adapter.get_system_prompt_path()
             if prompt_path:
-                prompt_content = adapter.get_system_prompt_content()
-                if prompt_content:
-                    print(f"  Writing instructions to {prompt_path}...")
-                    _merge_system_prompt(prompt_path, prompt_content)
+                print(f"  Writing instructions to {prompt_path}...")
+                adapter.install_system_prompt()
         else:
             print(f"  ✗ {adapter.name} — setup failed")
 
@@ -882,61 +881,6 @@ def _run_install(args):
         print("\nAll integrations failed. Run with --dry-run to preview config.")
         sys.exit(1)
 
-
-_CLAUDE_MD_MARKER_START = "<!-- BEGIN truememory-ingest managed section -->"
-_CLAUDE_MD_MARKER_END = "<!-- END truememory-ingest managed section -->"
-
-
-def _merge_system_prompt(target_path: Path, prompt_content: str) -> None:
-    """Merge the system prompt content into the user's project settings or markdown file.
-
-    Uses marker comments to delimit the managed section so it can be
-    safely updated or removed later. The user's existing content outside
-    the markers is preserved untouched.
-    """
-    managed_block = (
-        f"\n{_CLAUDE_MD_MARKER_START}\n"
-        f"{prompt_content.strip()}\n"
-        f"{_CLAUDE_MD_MARKER_END}\n"
-    )
-
-    try:
-        target_path.parent.mkdir(parents=True, exist_ok=True)
-    except OSError as e:
-        print(f"  [WARN] Cannot create {target_path.parent}: {e}")
-        return
-
-    # Read existing content if present
-    existing = ""
-    if target_path.exists():
-        try:
-            existing = target_path.read_text(encoding="utf-8")
-        except OSError as e:
-            print(f"  [WARN] Cannot read existing prompt file: {e}")
-            return
-
-    # Back up the existing file before mutating it
-    if existing and target_path.exists():
-        import time as _time
-        backup_path = target_path.with_name(f"CLAUDE.md.bak.{int(_time.time())}")
-        try:
-            backup_path.write_text(existing, encoding="utf-8")
-        except OSError:
-            pass  # Non-fatal
-
-    # If a managed block already exists, replace it; otherwise append
-    if _CLAUDE_MD_MARKER_START in existing and _CLAUDE_MD_MARKER_END in existing:
-        before, _, rest = existing.partition(_CLAUDE_MD_MARKER_START)
-        _, _, after = rest.partition(_CLAUDE_MD_MARKER_END)
-        new_content = before.rstrip() + managed_block + after.lstrip()
-    else:
-        new_content = existing.rstrip() + "\n" + managed_block if existing else managed_block
-
-    try:
-        target_path.write_text(new_content, encoding="utf-8")
-        print(f"  [OK] Merged truememory instructions into {target_path}")
-    except OSError as e:
-        print(f"  [WARN] Cannot write CLAUDE.md: {e}")
 
 
 def _run_status(args):
@@ -1042,65 +986,32 @@ def _run_status(args):
 
 
 def _run_uninstall(args):
-    """Remove truememory hooks from Claude Code settings."""
-    settings_path = Path.home() / ".claude" / "settings.json"
-    if not settings_path.exists():
-        print(f"No settings file at {settings_path} — nothing to uninstall")
+    """Remove TrueMemory hooks and configurations from all CLIs."""
+    from truememory.hooks.registry import detect_configured
+    from truememory.hooks.cli import uninstall_cli
+
+    configured = detect_configured()
+    if not configured:
+        print("No configured CLIs found.")
         return
 
-    try:
-        settings = json.loads(settings_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as e:
-        print(f"ERROR: settings.json is invalid JSON: {e}", file=sys.stderr)
-        sys.exit(1)
-
-    hooks = settings.get("hooks", {})
-    removed = []
-
-    for event in list(hooks.keys()):
-        event_hooks = hooks[event]
-        if not isinstance(event_hooks, list):
+    for adapter in configured:
+        if args.dry_run:
+            print(f"[Dry Run] Would uninstall TrueMemory from {adapter.name}:")
+            print(f"  - Config path: {adapter.config_path}")
+            prompt_path = adapter.get_system_prompt_path()
+            if prompt_path:
+                print(f"  - Would remove truememory instructions from {prompt_path}")
             continue
-        kept = []
-        for h in event_hooks:
-            if isinstance(h, dict) and "truememory" in str(h.get("command", "")).lower():
-                removed.append(f"{event}: {h.get('command', '')[:80]}")
-            else:
-                kept.append(h)
-        if kept:
-            hooks[event] = kept
+
+        print(f"Uninstalling TrueMemory from {adapter.name}...")
+        success = uninstall_cli(adapter.cli_id)
+        if success:
+            print(f"  ✓ {adapter.name} — cleaned up")
+            adapter.uninstall_system_prompt()
         else:
-            del hooks[event]
+            print(f"  ✗ {adapter.name} — cleanup failed")
 
-    if not removed:
-        print("No truememory hooks found in settings.json")
-        return
-
-    if args.dry_run:
-        print("Would remove:")
-        for r in removed:
-            print(f"  - {r}")
-        return
-
-    settings["hooks"] = hooks
-    settings_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
-    print(f"Removed {len(removed)} truememory hooks from {settings_path}")
-    for r in removed:
-        print(f"  - {r}")
-
-    # Also remove the managed CLAUDE.md block if present
-    claude_md_path = Path.home() / ".claude" / "CLAUDE.md"
-    if claude_md_path.exists():
-        try:
-            content = claude_md_path.read_text(encoding="utf-8")
-            if _CLAUDE_MD_MARKER_START in content and _CLAUDE_MD_MARKER_END in content:
-                before, _, rest = content.partition(_CLAUDE_MD_MARKER_START)
-                _, _, after = rest.partition(_CLAUDE_MD_MARKER_END)
-                new_content = (before.rstrip() + "\n" + after.lstrip()).strip() + "\n"
-                claude_md_path.write_text(new_content, encoding="utf-8")
-                print(f"Removed truememory-managed section from {claude_md_path}")
-        except OSError:
-            pass
 
 
 def _run_stats(args):

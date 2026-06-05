@@ -21,7 +21,6 @@ import pytest
 from truememory import vector_search
 from truememory.storage import create_db
 from truememory.vector_search import (
-    EMBEDDING_MODEL,
     TrueMemoryMigrationError,
     _check_embedder_compatibility,
     _check_rebuild_allowed,
@@ -91,7 +90,7 @@ def test_metadata_written_on_build_vectors(tmp_path):
     assert n == 2
 
     model, dim = _read_embedder_metadata(conn)
-    assert model == EMBEDDING_MODEL
+    assert model == vector_search.EMBEDDING_MODEL
     assert dim is not None and dim > 0
 
 
@@ -105,13 +104,14 @@ def test_model_change_raises_migration_error_at_matching_dim(
     """
     conn = _fresh_conn(tmp_path)
     init_vec_table(conn)
-    # Pretend this DB was built with model2vec previously
     _write_embedder_metadata(conn)
-    assert _read_embedder_metadata(conn)[0] == EMBEDDING_MODEL
+    assert _read_embedder_metadata(conn)[0] == vector_search.EMBEDDING_MODEL
 
     # Now simulate the user switching tier (same dim, different model) WITHOUT
     # going through truememory_configure()
-    monkeypatch.setattr(vector_search, "EMBEDDING_MODEL", "qwen3_256")
+    current_model = vector_search.EMBEDDING_MODEL
+    drift_model = "model2vec" if current_model == "qwen3_256" else "qwen3_256"
+    monkeypatch.setattr(vector_search, "EMBEDDING_MODEL", drift_model)
     # dim stays the same
 
     # init_vec_table must reject this silent drift
@@ -184,7 +184,9 @@ def test_check_rebuild_allowed_raises_on_model_drift(tmp_path, monkeypatch):
     _write_embedder_metadata(conn)  # records current EMBEDDING_MODEL
 
     # Simulate live tier switch without a re-embed
-    monkeypatch.setattr(vector_search, "EMBEDDING_MODEL", "qwen3_256")
+    current_model = vector_search.EMBEDDING_MODEL
+    drift_model = "model2vec" if current_model == "qwen3_256" else "qwen3_256"
+    monkeypatch.setattr(vector_search, "EMBEDDING_MODEL", drift_model)
 
     with pytest.raises(TrueMemoryMigrationError) as excinfo:
         _check_rebuild_allowed(conn)
