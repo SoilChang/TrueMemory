@@ -26,7 +26,17 @@ def _get_all_adapters() -> list[CLIAdapter]:
     from truememory.hooks.adapters.kimi import KimiAdapter
     from truememory.hooks.adapters.hermes import HermesAdapter
     from truememory.hooks.adapters.openclaw import OpenClawAdapter
-    return [ClaudeAdapter(), CodexAdapter(), CursorAdapter(), GeminiAdapter(), KimiAdapter(), HermesAdapter(), OpenClawAdapter()]
+    from truememory.hooks.adapters.agy import AgyAdapter
+    return [
+        ClaudeAdapter(),
+        CodexAdapter(),
+        CursorAdapter(),
+        GeminiAdapter(),
+        KimiAdapter(),
+        HermesAdapter(),
+        OpenClawAdapter(),
+        AgyAdapter(),
+    ]
 
 
 def detect_installed() -> list[CLIAdapter]:

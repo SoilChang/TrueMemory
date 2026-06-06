@@ -220,10 +220,12 @@ def extract_facts(
             response = complete(config, prompt, system=EXTRACTION_SYSTEM)
         except LLMError as e:
             log.error(
-                "LLM extraction failed for chunk %d/%d (%s): %s",
+                "LLM extraction failed for chunk %d/%d (%s): %s — falling back to regex extraction",
                 i + 1, len(chunks), config.provider, e,
             )
-            # Keep whatever we've gathered from earlier chunks; don't let a
+            chunk_facts = extract_facts_simple(chunk)
+            all_facts.extend(chunk_facts)
+            # Keep whatever we've gathered from earlier/fallback chunks; don't let a
             # single mid-transcript failure wipe out the whole extraction.
             continue
         except Exception as e:

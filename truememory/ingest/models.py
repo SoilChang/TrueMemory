@@ -119,9 +119,12 @@ def hydrate_config(config: LLMConfig) -> LLMConfig:
             if available and config.model not in available:
                 config.model = available[0]
 
-    elif provider in ("claude_cli", "claude-cli"):
-        # Normalize to underscore form for downstream dispatch
-        config.provider = "claude_cli"
+    elif provider in ("claude_cli", "claude-cli", "agy_cli", "agy-cli"):
+        # Normalize to appropriate form for downstream dispatch
+        if "agy" in provider:
+            config.provider = "agy_cli"
+        else:
+            config.provider = "claude_cli"
         # No api_key, no base_url — the CLI handles auth and routing.
         # Leave model empty by default so the CLI picks the user's
         # configured default (usually Opus); callers can override.
@@ -138,7 +141,10 @@ def auto_detect() -> LLMConfig:
     2. Claude CLI (free for subscribers, uses OAuth — no API key)
     3. OpenRouter (one key for many models)
     4. Anthropic (direct API)
+    5. Active CLI (Antigravity) if matched on PATH & env
     """
+    from truememory.hooks.registry import get_adapter
+
     # 1. Ollama — fully offline, no cost, first choice
     if _ollama_available():
         cfg = hydrate_config(LLMConfig(provider="ollama"))
@@ -146,7 +152,6 @@ def auto_detect() -> LLMConfig:
         return cfg
 
     # 2. Claude CLI — zero additional cost for subscribers, no key mgmt
-    from truememory.hooks.registry import get_adapter
     claude = get_adapter("claude")
     if claude and claude.can_complete():
         log.info("Auto-detected Claude CLI (subscription auth)")
@@ -161,6 +166,12 @@ def auto_detect() -> LLMConfig:
     if os.environ.get("ANTHROPIC_API_KEY", ""):
         log.info("Auto-detected Anthropic API key")
         return hydrate_config(LLMConfig(provider="anthropic"))
+
+    # 5. Active CLI (Antigravity)
+    agy = get_adapter("agy")
+    if agy and agy.can_complete():
+        log.info("Auto-detected Antigravity CLI")
+        return hydrate_config(LLMConfig(provider="agy_cli"))
 
     raise RuntimeError(
         "No LLM backend found for fact extraction. Options:\n"
@@ -177,11 +188,11 @@ def complete(config: LLMConfig, prompt: str, system: str = "") -> str:
 
     Uses the OpenAI-compatible API for Ollama and OpenRouter.
     Uses the Anthropic SDK for direct Anthropic calls.
-    Uses the local ``claude`` CLI binary for the claude_cli provider.
+    Uses the local CLI binary for the local provider (claude_cli, agy_cli).
     """
     if config.provider == "anthropic":
         return _complete_anthropic(config, prompt, system)
-    if config.provider in ("claude_cli", "claude-cli"):
+    if config.provider in ("claude_cli", "claude-cli", "agy_cli"):
         return _complete_local_cli(config, prompt, system)
     return _complete_openai_compat(config, prompt, system)
 
@@ -360,11 +371,16 @@ def _complete_anthropic(config: LLMConfig, prompt: str, system: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Local CLI completion (uses a registered CLI adapter)
+# Claude CLI completion (uses the local `claude` binary + subscription auth)
 # ---------------------------------------------------------------------------
 
+def _claude_cli_available() -> bool:
+    """Return True if the `claude` CLI binary is on PATH."""
+    return shutil.which("claude") is not None
+
+
 def _complete_local_cli(config: LLMConfig, prompt: str, system: str) -> str:
-    """Complete using a local CLI binary via its registered CLI adapter.
+    """Complete using a local CLI binary (claude or agy).
 
     This backend delegates execution to the corresponding CLI adapter,
     which manages its own binary arguments, authentication checks, and
@@ -376,7 +392,10 @@ def _complete_local_cli(config: LLMConfig, prompt: str, system: str) -> str:
 
     provider = config.provider
     if provider == "auto":
-        provider = "claude_cli"
+        if os.environ.get("ANTIGRAVITY_SOURCE_METADATA") or os.environ.get("AGY_DIR"):
+            provider = "agy_cli"
+        else:
+            provider = "claude_cli"
 
     # Normalize 'claude_cli' -> 'claude'
     cli_id = provider.replace("_cli", "").replace("-cli", "")
